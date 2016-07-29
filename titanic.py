@@ -3,6 +3,7 @@ import numpy as np
 import csv as csv
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
+from sklearn import cross_validation
 
 from ggplot import ggplot, aes, geom_bar, geom_histogram
 
@@ -67,19 +68,25 @@ test_data = test_df.values
 #print(train_df.info())
 #print(test_df.info())
 
-forest = RandomForestClassifier(n_estimators=100)
+forest = RandomForestClassifier(n_estimators=500)
 forest = forest.fit(train_data[0::,1::], train_data[0::,0])
 
-# Calculate training error
-score = forest.score(train_data[0::,1::], train_data[0::,0])
-print(score * 100)
+scores = cross_validation.cross_val_score(forest, train_data[0::,1::], train_data[0::,0], cv=5)
 
-print(forest.feature_importances_)
-print(train_df.info())
+# >>> clf = svm.SVC(kernel='linear', C=1)
+# >>> scores = cross_validation.cross_val_score(
+# ...    clf, iris.data, iris.target, cv=5)
+
+# Calculate training error
+#score = forest.score(train_data[0::,1::], train_data[0::,0])
+#print(score * 100)
+
+#print(forest.feature_importances_)
+#print(train_df.info())
 
 output = forest.predict(test_data[0::,1::]).astype(int)
 
-predictions_file = open("myfirstforest.csv", "wb")
+predictions_file = open("forestPython.csv", "wb")
 open_file_object = csv.writer(predictions_file)
 open_file_object.writerow(["PassengerId","Survived"])
 open_file_object.writerows(zip(ids, output))
@@ -100,6 +107,8 @@ open_file_object = csv.writer(predictions_file)
 open_file_object.writerow(["PassengerId","Survived"])
 open_file_object.writerows(zip(ids, output))
 predictions_file.close()
+
+
 
 
 
