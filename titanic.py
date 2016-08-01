@@ -51,9 +51,9 @@ def clean_up(df, ports_dict):
 
     # Missing Fares should be median of their respective classes
     median_fare = np.zeros(3)
-    for f in range(0,3):
+    for f in range(0, 3):
         median_fare[f] = df[df.Pclass == f+1]['Fare'].dropna().median()
-    for f in range(0,3):
+    for f in range(0, 3):
         df.loc[df.Fare.isnull() & df.Pclass == f+1, 'Fare'] = median_fare[f]
     
     titles = pd.get_dummies(combo_df['Title'])
@@ -63,7 +63,7 @@ def clean_up(df, ports_dict):
     df['FamilySize'] = df['SibSp'] + df['Parch'] + 1
     
     # Remove the columns that should be dropped
-    df = df.drop(['Name', 'PassengerId', 'Cabin', 'Ticket', 'Title', 'SibSp', 'Parch'], axis=1) 
+    df = df.drop(['Name', 'PassengerId', 'Cabin', 'Ticket', 'Title'], axis=1) 
     
     return(df)
 
@@ -94,21 +94,14 @@ test_df = combo_df[891::]
 ### Random Forest
 # Training
 # sklearn needs numpy arrays, not DataFrames, so convert back to a numpy array
-train_data = train_df.values
-test_data = test_df.values
 
 np.random.seed(1)
 forest = RandomForestClassifier(n_estimators=500)
-forest = forest.fit(train_data[0::,1::], train_data[0::,0])
+#forest = forest.fit(train_data[0::,1::], train_data[0::,0])
 
-#scores = cross_validation.cross_val_score(forest, train_data[0::,1::], train_data[0::,0], cv=5)
-
-# Calculate training error
-score = forest.score(train_data[0::,1::], train_data[0::,0])
-print("Random Forest accuracy: %.2f" % (score * 100))
-
-#print(forest.feature_importances_)
-#print(train_df.info())
+predictors = ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"]
+scores = cross_validation.cross_val_score(forest, train_df[predictors], train_df["Survived"], cv = 3)
+print("Random Forest Accuracy: %.2f" % scores.mean())
 
 output = forest.predict(test_data[0::,1::]).astype(int)
 
@@ -134,6 +127,8 @@ open_file_object = csv.writer(predictions_file)
 open_file_object.writerow(["PassengerId","Survived"])
 open_file_object.writerows(zip(ids, output))
 predictions_file.close()
+
+
 
 
 
