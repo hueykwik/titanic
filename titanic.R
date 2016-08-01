@@ -1,11 +1,17 @@
 library(dplyr)
 library(readr)
 library(randomForest)
+library(reshape)
 
 Mode <- function(x) {
   ux <- unique(x)
   ux[which.max(tabulate(match(x, ux)))]
 }
+
+RMSE = function(x, y) sqrt(mean((x-y)^2))
+
+# Returns string w/o leading or trailing whitespace
+Trim <- function (x) gsub("^\\s+|\\s+$", "", x)
 
 CleanUpData = function(data) {
   # Change Sex from character to factor
@@ -37,24 +43,57 @@ CleanUpData = function(data) {
     data[is.na(data$Fare) & data$Pclass == i, 'Fare'] = median_fare[i]
   }
   
+  # Extract titles
+  data$Title = sapply(data$Name, FUN=function(x) {Trim(strsplit(x, split='[,.]')[[1]][2])})
+  data$Title[data$Title %in% c('Capt', 'Don', 'Major', 'Sir')] = 'Sir'
+  data$Title[data$Title %in% c('Dona', 'Lady', 'the Countess', 'Jonkheer')] = 'Lady'
+  data$Title = factor(data$Title, levels = unique(data$Title))
+  
+  # Create FamilySize
+  data$FamilySize = data$SibSp + data$Parch + 1
+  
+  # data$Surname = sapply(data$Name, function(x) {strsplit(x, split='[,.]')[[1]][1]})
+  # data$FamilyId = paste0(as.character(data$FamilySize), data$Surname)
+  # data$FamilySize[data$FamilySize <= 2] = 'Small'
+  # 
+  # famIds = data.frame(table(data$FamilyId))
+  # famIds = famIds[famIds$Freq <=2, ]
+  # 
+  # data$FamilyId[data$FamilyId %in% famIds$Var1] = 'Small'
+  # data$FamilyId = factor(data$FamilyId)
+  
   return(data)
 }
 
 train.df = read_csv('train-original.csv')
-train.df = CleanUpData(train.df)
-
 test.df = read_csv('test.csv')
-test.df = CleanUpData(test.df)
 
-train.df = train.df %>% select(Survived, Pclass, Sex, Age, SibSp, Parch, Fare, 
-                               Embarked)
+combo.df = rbind(train.df, test.df)
+combo.df = CleanUpData(combo.df)
+
+train.df = combo.df[1:891, ]
+test.df = combo.df[892:1309, ]
+
+# train.df = train.df %>% select(Survived, Pclass, Sex, Age, SibSp, Parch, Fare, 
+#                                Embarked, Title)
+train.df = train.df %>% select(Survived, Pclass, Sex, Age, FamilySize, Fare, 
+                               Embarked, Title, SibSp, Parch)
+
 
 # Random Forest
-p = 7
-rf = randomForest(as.factor(Survived) ~ Pclass + Sex + Age + SibSp + Parch 
-                  + Fare + Embarked, data = train.df, mtry = floor(sqrt(p)))
+set.seed(1)
+
+rf = randomForest(as.factor(Survived) ~ ., data = train.df, importance = TRUE)
+varImpPlot(rf)
+
+print(paste("Accuracy", sum(rf$predicted == train.df$Survived) / nrow(train.df)))
 
 predictions = predict(rf, test.df)
 submission = data.frame(PassengerId = test.df$PassengerId, Survived = predictions)
 write.csv(submission, file = "forestR.csv", row.names = FALSE)
 
+cf = cforest(as.factor(Survived) ~ ., data = train.df, 
+             controls=cforest_unbiased(ntree=2000, mtry=3))
+predictions = predict(cf, test.df, OOB=TRUE, type="response")
+submission = data.frame(PassengerId=test.df$PassengerId, Survived=predictions)
+write.csv(submission, file = "conditionalForestR.csv", row.names = FALSE)
