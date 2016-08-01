@@ -7,6 +7,19 @@ from sklearn import cross_validation
 
 from ggplot import ggplot, aes, geom_bar, geom_histogram
 
+import random
+import re
+
+def replace_titles(data):
+    title = data['Title']
+    
+    if title in ['Don', 'Capt', 'Major']:
+        return 'Sir'
+    elif title in ['Dona', 'the Countess', 'Jonkheer']:
+        return 'Lady'
+    else:
+        return title
+
 def clean_up(df, ports_dict):
     # Clean up the data.
     # Columns with nulls: Age, Embarked
@@ -30,9 +43,12 @@ def clean_up(df, ports_dict):
     # Convert Sex to integer
     df['Sex'] = df['Sex'].map({'female': 0, 'male': 1}).astype(int)
 
-    # Remove the columns that should be dropped
-    df = df.drop(['Name', 'PassengerId', 'Cabin', 'Ticket'], axis=1) 
+    # Extract titles
+    df['Title'] = [re.split(', |\. ', name)[1] for name in df.Name]
+    df['Title'] = df.apply(replace_titles, axis = 1)
     
+    # Use dummies to generate a column for each of the 12 remaining columns (have to use all 12 here if possible)
+
     # Missing Fares should be median of their respective classes
     median_fare = np.zeros(3)
     for f in range(0,3):
@@ -40,11 +56,23 @@ def clean_up(df, ports_dict):
     for f in range(0,3):
         df.loc[df.Fare.isnull() & df.Pclass == f+1, 'Fare'] = median_fare[f]
     
+    titles = pd.get_dummies(combo_df['Title'])
+    df = pd.concat([df, titles], axis = 1)
+    
+    # Create FamilySize
+    df['FamilySize'] = df['SibSp'] + df['Parch'] + 1
+    
+    # Remove the columns that should be dropped
+    df = df.drop(['Name', 'PassengerId', 'Cabin', 'Ticket', 'Title', 'SibSp', 'Parch'], axis=1) 
+    
     return(df)
 
-# Load the training data.
 train_df = pd.read_csv('train-original.csv', header=0)
+test_df = pd.read_csv('test.csv', header=0) 
 
+ids = test_df['PassengerId']
+
+combo_df = train_df.append(test_df)
 # Convert Embarked to int
 # Breaking this down:
 # np.unique returns unique values in the input 
@@ -52,12 +80,16 @@ train_df = pd.read_csv('train-original.csv', header=0)
 ports = enumerate(np.unique(train_df['Embarked']))
 ports_dict = { name: i for i, name in ports }
 
-train_df = clean_up(train_df, ports_dict)
+combo_df = clean_up(combo_df, ports_dict)
 
-# Test Data
-test_df = pd.read_csv('test.csv', header=0)  
-ids = test_df['PassengerId'].values
-test_df = clean_up(test_df, ports_dict)
+# Move Survived into the first column
+column_list = combo_df.columns.tolist()
+column_list.remove('Survived')
+column_list = ['Survived'] + column_list
+combo_df = combo_df[column_list]
+
+train_df = combo_df[0:891]
+test_df = combo_df[891::]
 
 ### Random Forest
 # Training
@@ -65,21 +97,15 @@ test_df = clean_up(test_df, ports_dict)
 train_data = train_df.values
 test_data = test_df.values
 
-#print(train_df.info())
-#print(test_df.info())
-
+np.random.seed(1)
 forest = RandomForestClassifier(n_estimators=500)
 forest = forest.fit(train_data[0::,1::], train_data[0::,0])
 
-scores = cross_validation.cross_val_score(forest, train_data[0::,1::], train_data[0::,0], cv=5)
-
-# >>> clf = svm.SVC(kernel='linear', C=1)
-# >>> scores = cross_validation.cross_val_score(
-# ...    clf, iris.data, iris.target, cv=5)
+#scores = cross_validation.cross_val_score(forest, train_data[0::,1::], train_data[0::,0], cv=5)
 
 # Calculate training error
-#score = forest.score(train_data[0::,1::], train_data[0::,0])
-#print(score * 100)
+score = forest.score(train_data[0::,1::], train_data[0::,0])
+print("Random Forest accuracy: %.2f" % (score * 100))
 
 #print(forest.feature_importances_)
 #print(train_df.info())
@@ -98,15 +124,32 @@ logistic = logistic.fit(train_data[0::,1::], train_data[0::,0])
 
 # Calculate training error
 score = logistic.score(train_data[0::,1::], train_data[0::,0])
-print(score * 100)
+print("Logistic accuracy: %.2f" % (score * 100))
+
 
 output = logistic.predict(test_data[0::,1::]).astype(int)
 
-predictions_file = open("logistic.csv", "wb")
+predictions_file = open("logisticPython.csv", "wb")
 open_file_object = csv.writer(predictions_file)
 open_file_object.writerow(["PassengerId","Survived"])
 open_file_object.writerows(zip(ids, output))
 predictions_file.close()
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
