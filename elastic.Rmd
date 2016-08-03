@@ -1,13 +1,23 @@
 ---
-title: "Lasso Ridge Implementation"
-author: "Bisaria"
-date: "May 20, 2016"
+title: "Lasso Ridge Elastic Implementation"
+author: "Huey"
+date: "August 3rd, 2016"
 output: html_document
 ---
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 ```
+
+# Note
+
+I forked this from Bisaria's [Lasso Ridge Implementation|https://www.kaggle.io/svf/272035/c7674afa411b198f92611a43fe7d7c75/__results__.html#lasso-and-ridge-models]. Besides some minor edits
+to the order or the confusion table and some notes, the original document is intact.
+My work starts at "Kaggle - Elastic."
+
+I tried using elastic net regularization to see if it would perform better than
+lasso or ridge. Surprisingly, it did not. It's possible I'm doing something incorrectly,
+but hopefully the code here could be useful for someone.
 
 # Introduction
 
@@ -312,14 +322,10 @@ It is observed that Age of 263 passengers is missing from the combined dataset, 
 ```{r}
 marginplot(data.frame(all$Age, all$Pclass))
 
-table(all[is.na(all$Age), "Pclass"])  # makes it more obvious than the plot
+table(all[is.na(all$Age), "Pclass"])
 ```
 
 The missing age is not randomly distributed across all classes, but is rather concentrated amongst the passengers from 3rd class, indicating a missing at random(MAR) problem. Mice package can be used to impute these data using pmm or predictive mean matching method.
-
-Huey questions: 
-- Re: above, don't see the concentration from the margin plot, but using a table works
--Why do we exclude the columns below? Survived and PassengerId make sense
 
 ```{r, warning=FALSE,results='hide'}
 
@@ -339,9 +345,6 @@ ggplot(all,aes(x=Age)) +
 ```
 
 Imputed data seem to be acceptable and can be used for filling in the missing values in AgeClass and Title.
-
-Huey questions: Not sure why we use the sixth imputed data, not the eight
-TODO: can see if it affects results
 
 ```{r}
 # Sixth imputed data is picked up for further analysis based on the density distribution
@@ -388,8 +391,6 @@ table(all$CabinNo, all$Pclass)
 
 There are still some missing cabin data. Divide the unknown observations for cabin no into cabins for each Pclass in the same ratio as currently available. 
 
-Edit: some should be a lot. This technique above only changed 5 rows from NA to not NA
-
 ```{r}
 # Note: This procedure has been taken from script submitted on Kaggle.
 
@@ -429,7 +430,6 @@ all$CabinNo = as.factor(all$CabinNo)
 table(all$CabinNo, all$Pclass)
 ```
  
- 
 Finally, dataset is divided back into training and test set for further analysis.
 
 ```{r}
@@ -447,12 +447,12 @@ train$Survived <- as.factor(mapvalues(train$Survived, c("0", "1"), c("No","Yes")
 train$PassengerId = NULL
 ```
 
-Huey question: why do you need to map values from 0 to 1 to no yes? for clarity?
-
 # Lasso and Ridge Models
 
 ## Training and validation sets
 Dataset is split into separate male and female datasets, with respective Training and validation sets created using sample.split function. Levels and variables that are no longer meaningful in the newly created datasets are dropped.
+
+When using ridge regression, it is suggested to scale the numeric columns. I've done this below, but didn't find it to have any effect on the actual results.
 
 ```{r}
 train.male = subset(train, train$Sex == "male")
@@ -486,6 +486,29 @@ splt.f = sample.split(train.female, 0.75)
 cv.train.f = train.female[splt.f,]
 cv.test.f = train.female[!splt.f,]
 
+numericFeatures = c('Age', 'SibSp', 'Parch', 'Fare')
+
+for (colName in numericFeatures) {
+  # Males
+  # Scale train
+  cv.train.m[colName] = scale(cv.train.m[colName])
+  center = attr(cv.train.m[[colName]], "scaled:center")
+  scale = attr(cv.train.m[[colName]], "scaled:scale")
+  
+  # Use the same scale for validation and test sets
+  cv.test.m[colName] = scale(cv.test.m[colName], center = center, scale = scale)
+  test.male[colName] = scale(test.male[colName], center = center, scale = scale)
+  
+  # Females
+  # Scale train
+  cv.train.f[colName] = scale(cv.train.f[colName])
+  center = attr(cv.train.f[[colName]], "scaled:center")
+  scale = attr(cv.train.f[[colName]], "scaled:scale")
+  
+  # Use the same scale for validation and test sets
+  cv.test.f[colName] = scale(cv.test.f[colName], center = center, scale = scale)
+  test.female[colName] = scale(test.female[colName], center = center, scale = scale)
+}
 ```
 
 
@@ -606,7 +629,8 @@ In view of zero survival prediction among the adult male and too many false posi
 
 ## Kaggle Results - Elastic
 
-Below, we try elastic net regression
+Below, we try elastic net regression. We use cross-validation to select the best
+values of alpha and lambda.
 
 ### Male
 
@@ -637,9 +661,8 @@ Elastic.PredTest.M = predict(fit, newx=data.matrix(test.male[,3:15]), type="clas
 table(Elastic.PredTest.M, test.male$Title)  
 ```
 
-Kappa appears higher on the training set
-However, Kappa is lower on the validation set
-
+Kappa is better here than ridge/lasso on the training set, but worse when looking 
+on the validation set.
 
 ### Female
 
@@ -669,8 +692,8 @@ Elastic.PredTest.F = predict(fit, newx=data.matrix(test.female[,3:16]), type="cl
 table(Elastic.PredTest.F, test.female$Title)  
 ```
 
-Kappa is better on training than ridge (0.69) and lasso (0.66)
-Kappai is the same as validation (0.77) compared to ridge and (0.77)
+Kappa is better on training than ridge (0.69) and lasso (0.66).
+Kappa is the same as validation (0.77) compared to ridge and lasso (0.77).
 
 
 ```{r}
@@ -688,14 +711,13 @@ table(MySubmission$Survived)
 write.csv(MySubmission, file = 'Submission_ELASTIC.csv', row.names = F)
 ```
 
-Result = 0.80861
+Result = 0.80861.
 
 # Conclusion
 
 Ridge regression seems to predict on female dataset with higher precision and recall than on the male. Since the number of survivors in the male dataset is much less than that in female dataset, it fails to predict survivors especially among the adult male. 
 
-Elastic net regularization didn't seem to do any better, but as with anything, it's possible I could be doing something incorrectly. I hope
-this could be a good starting point for someone else.
+Elastic net regularization didn't seem to do any better, but as with anything, it's possible I could be doing something incorrectly. I hope this could be a good starting point for someone else.
 
 ## What next?
 
