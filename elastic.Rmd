@@ -1,0 +1,704 @@
+---
+title: "Lasso Ridge Implementation"
+author: "Bisaria"
+date: "May 20, 2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+This is an attempt at predicting survivors in the Titanic dataset, using lasso and ridge regression methods, specifically glmnet package in R. Since an early exploration of data divulges huge disparity in survival ratio between men and women, separate predictive models were trained for both. As many observations had their Age variable missing, the Multiple Imputation by Chained Equations (MICE) package has been used for imputing missing age.
+
+Models trained using ridge regression on male and lasso on female datasets yielded an accuracy of 0.81818 on public leaderboard. Interestingly, although lasso model on female dataset had marginally better misclassification error, performance on leaderboard improved on using ridge model. Furthermore, classifying the ladies above 14.5 years as 'Ms' after imputing the Age led to improved performance of 0.82297 on the public leaderboard.
+
+Since male model's prediction of survivors on the training and held-out test set was not good, it needs to be further explored using other algorithms.
+
+## Load data
+
+```{r}
+titanic.train <- read.csv("train.csv", stringsAsFactor=FALSE)
+titanic.test <- read.csv("test.csv", stringsAsFactor=FALSE)
+
+```
+
+## Load R library
+
+```{r,message=F,warning=FALSE}
+library(plyr)
+library(rpart)
+library(caret)
+library(caTools)
+library(mice)
+library(stringr)
+library(Hmisc)
+library(ggplot2)
+library(vcd)
+library(ROCR)
+library(pROC)
+library(VIM)
+library(glmnet)    
+```
+
+
+# Exploratory Data Analysis
+
+First a quick peak into the dataset. 
+
+```{r}
+str(titanic.train)
+summary(titanic.train)
+table(titanic.train$Survived, titanic.train$Sex)
+```
+
+There are 891 passangers in the training data, comprising of 314 female and 577 male passengers, out of which 233 females and 109 males survived the disaster. The dataset provides information about each passenger's name, age, gender, their port of embarkation, which cabin they booked, their ticket number and fare they paid along with number of family members they were travelling with.
+
+First step would be to check if these variables have any correlation with the response variable Survived. In the dataset provided, some of the data like Age, Cabin etc. are missing. They will be ignored for preliminary exploration of the data. 
+
+## Did age influence survival?
+
+A scatter plot of age of each passenger, incorporating the information if the passenger <span style = "color:#FF0000">perished</span> or <span style = "color:#0000FF">survived</span> the disaster, show that while most of the casualty were male, those below the age of 15 years seem to have more or less same survival rate as females within that age group. Also, females above 50 seem to have better survival rate, while males above 50 are worse off than their middle-aged counterparts within their own gender groups.
+
+```{r, warning=FALSE,fig.height=3,fig.width=7}
+ggplot(titanic.train, aes(x=Age, y=PassengerId, color = as.factor(Survived))) +                      
+    geom_point() + 
+    facet_grid(Sex ~.) +
+    ggtitle("Survival vs Passenger's Age")+
+    xlab("Age") + 
+    theme(legend.position = "none")+
+    scale_colour_manual(values = c("#FF0000","#0000FF"))
+```
+
+This information can be used later while creating new features based on age.
+
+## Is survival of a passenger related to his/her Pclass and port of embarkation?
+
+Since passengers travelled in different classes, it would be worthwhile to check if there exists any correlation between his/her class of travel, from whence he/she boarded and whether they finally <span style = "color:#FF0000">perished</span> or <span style = "color:#0000FF">survived.
+
+```{r, warning=FALSE,fig.height=3,fig.width=7}
+ggplot(titanic.train[titanic.train$Embarked != "",], aes(x=Embarked, y=PassengerId)) +  
+  geom_tile(aes(fill = as.factor(Survived))) + 
+  facet_grid(. ~ Pclass) +
+  ggtitle("Survival vs Passenger's Pclass and Port of Embarkation")+
+  theme(legend.position = "none")+
+  scale_fill_manual(values = c("#FF0000","#0000FF"))
+```
+
+Most of the passengers who perished had embarked from port 'S' and were travelling 3rd class.
+
+```{r, warning=FALSE,fig.height=3,fig.width=7}
+ggplot(titanic.train[titanic.train$Embarked != "",], aes(x=Embarked, y=PassengerId)) +  
+  geom_tile(aes(fill = as.factor(Survived))) + 
+  facet_grid(. ~ Sex) +
+  ggtitle("Survival vs Passenger's Sex and Port of Embarkation")+
+  theme(legend.position = "none")+
+  scale_fill_manual(values = c("#FF0000","#0000FF"))
+```
+
+Looks like most of the unfortunate passengers from port 'S' travelling 3rd class were male, while most of the casualty among females also happened among passengers from the port 'S'.
+
+## Did travelling with the family mattered?
+
+The vcd package, which provides a variety of methods for visualizing multivariate categorical data, has been used here to look at possible correlation between survival of a passengers based on their gender, age and number of family member accompanying them.
+
+```{r}
+mosaic(~ Sex + (Age > 15) + (SibSp + Parch > 0) + Survived, data = titanic.train[complete.cases(titanic.train),],
+       shade=T, legend=T)
+```
+
+Pearson residuals of 2 and higher suggest inter-dependece between the variables under consideration.
+
+Finally, a combined dataframe of training and test data is created, with 'Survived' feature removed from the train dataset and saved separately. This will be added back to the train dataset after further processing of the combined data set.
+ 
+```{r}
+Survived = titanic.train$Survived
+titanic.test$Survived = NA
+all = rbind(titanic.train, titanic.test)
+```
+
+# Feature engineering
+
+## Title 
+
+Names of the passengers consist of titles ascribed to each individual as per their gender, age and social status, which can be extracted and maximum and minimum age for each category can be enumerated.
+
+```{r}
+all$Title = sapply(all$Name,function(x) strsplit(x,', ')[[1]][2])
+all$Title = sapply(all$Title,function(x) strsplit(x,'\\. ')[[1]][1])
+
+as.data.frame(
+  cbind("Title" = unique(all$Title), 
+        "No_of_passengers" = sapply(unique(all$Title), function(x) nrow(all[all$Title == x,])),
+        "Age_missing" = sapply(unique(all$Title), function(x) nrow(all[all$Title == x & is.na(all$Age),])),
+        "Minimum_Age" = sapply(unique(all$Title), function(x) min(all[all$Title == x,'Age'], na.rm = TRUE)),
+        "Maximum_Age" = sapply(unique(all$Title), function(x) max(all[all$Title == x,'Age'], na.rm = TRUE))), row.names = F)
+```
+
+
+These 18 categories can be combined into more manageable 5 categories as per their gender and age:
+```{r}
+#   Mr:     For men above 14.5 years
+#   Master: For boys below and equal to 14.5 years
+#   Miss:   For girls below and equal to 14.5 years
+#   Ms:     For women above 14.5 years, maybe unmarried
+#   Mrs:    For married women above 14.5 years
+```
+
+All those who do not have missing age can be put into appropriate Title category on the basis of their age and gender as follows:
+
+```{r}
+
+all[(all$Title == "Mr" & all$Age <= 14.5 & !is.na(all$Age)),]$Title = "Master"
+
+all[all$Title == "Capt"|
+    all$Title == "Col"|
+    all$Title == "Don"|
+    all$Title == "Major"|
+    all$Title == "Rev"|      
+    all$Title == "Jonkheer"|
+    all$Title == "Sir",]$Title = "Mr"
+
+# None of these women are travelling with family, hence can be categorised as single women for this analysis
+all[all$Title == "Dona"|
+      all$Title == "Mlle"|
+      all$Title == "Mme",]$Title = "Ms"
+
+# Categories Lady and Countess as a married woman
+all[all$Title == "Lady"| all$Title == "the Countess",]$Title = "Mrs"
+
+# Categorise doctors as per their sex
+all[all$Title == "Dr" & all$Sex == "female",]$Title = "Ms"
+all[all$Title == "Dr" & all$Sex == "male",]$Title = "Mr"
+
+```
+All the titles have been successfully categorised into five defined categories excepting for observations in category Miss. Since Age feature is missing for these observations, they will be handled after imputing the missing age. Also, there is one women who is below 14.5 years of age and is married and hence has title Mrs, which is ignored.
+
+
+```{r}
+all$Title = as.factor(all$Title)
+all$Title <- droplevels(all$Title)
+summary(all$Title)
+```
+
+
+## FamilySize
+
+FamilySize is created based on the number of family member travelling with a passenger.
+ 
+```{r}
+all$FamilySize = ifelse(all$SibSp + all$Parch + 1 <= 3, 1,0) # Small = 1, Big = 0
+```
+
+## Mother
+Identify the ladies travelling with their children.
+
+```{r}
+all$Mother = ifelse(all$Title=="Mrs" & all$Parch > 0, 1,0)
+```
+
+## Single
+
+Identify people travelling solo.
+```{r}
+all$Single = ifelse(all$SibSp + all$Parch + 1 == 1, 1,0) # People travelling alone
+```
+
+## FamilyName
+
+Family name of each individual can be extracted from their names.
+```{r}
+all$FamilyName = sapply(all$Name,function(x) strsplit(x,', ')[[1]][1])
+```
+
+Since there are possibly many people sharing same family name, it is necessary to distinguish each family separately. 
+```{r}
+Family.Ticket = all[all$Single == 0,c("FamilyName", "Ticket")]
+Family.Ticket = Family.Ticket[order(Family.Ticket$FamilyName),]
+head(Family.Ticket)
+
+```
+
+Baring few exceptions, in general, a family shared the same ticket number. This can be a good way of identifying families. Here, last three digits of the ticket is extracted and attached to family names, thereby creating unique family names for each family.
+```{r}
+
+all$FamilyName  = paste(all$FamilyName , str_sub(all$Ticket,-3,-1), sep="")
+```
+
+
+## FamilySurvived
+
+Based on the exploratory analysis, a feature representing the survival of family can be created. One would hope that families travelling together would have tried to escape together and their survival must be closely tied to each other.
+
+```{r}
+all$FamilySurvived = 0
+# Dataset of passengers with family
+Families = all[(all$Parch+all$SibSp) > 0,]
+
+# Group families by their family name and number of survivals in the family
+Survival.GroupByFamilyName = aggregate(as.numeric(Families$Survived), by=list("FamilyName" = Families$FamilyName), FUN=sum, na.rm=TRUE)
+
+# Family is considered to have survived if atleast one member survived
+FamilyWithSurvival = Survival.GroupByFamilyName[Survival.GroupByFamilyName$x > 0,]$FamilyName
+all[apply(all, 1, function(x){ifelse(x["FamilyName"] %in% FamilyWithSurvival,TRUE,FALSE)}),]$FamilySurvived = 1
+
+```
+
+## AgeClass
+
+We can categorise Age into four classes
+Class 1: Below 10
+Class 2: between 10 to 20
+Class 3: between 20 to 35
+Class 4: Above 35
+
+```{r}
+all$AgeClass = ifelse(all$Age<=10,1,
+                      ifelse(all$Age>10 & all$Age<=20,2,
+                             ifelse(all$Age>20 & all$Age<=35,3,4)))
+all$AgeClass = as.factor(all$AgeClass)
+
+```
+
+Since Age is missing for many observations, there will be some data missing here too, which can be calculated after imputing Age.
+
+# Imputing missing data
+
+The Multiple Imputation by Chained Equations (MICE) package is used for multiple imputation through predictive mean matching method, specifically  for missing Age data, which ensures that imputed values are plausible. 
+
+```{r}
+all$Pclass = as.factor(all$Pclass)
+all$Sex = as.factor(all$Sex)
+all[all$Embarked == "",]$Embarked = NA
+all$Embarked = as.factor(all$Embarked)
+all[all$Cabin == "",]$Cabin = NA
+all$Cabin = as.factor(all$Cabin)
+all$FamilySize = as.factor(all$FamilySize)
+all$Mother = as.factor(all$Mother)
+all$Single = as.factor(all$Single)
+all$FamilyName = as.factor(all$FamilyName)
+
+md.pattern(all[,!names(all) %in% c("Survived", "Name", "PassengerId", "Ticket", "AgeClass")])
+```
+
+There are 263 observations Age feature missing from the dataset, 1 Observation with Fare, 2 observations with Embarked and 1014 observations have Cabin missing.
+
+## Embarked
+
+Two of the passengers have the information about their port of embarkation missing. These two observations belong to passengers, both female, both survived and both were in B Type cabin travelling first class. It is assumed they embarked at S, as most of the female from first class who survived embarked either from S or C.
+
+```{r}
+all$Embarked[is.na(all$Embarked)] = 'S'
+
+```
+
+## Fare
+
+R package rpart is used to predict one missing fare data, using other features as predictors.
+
+```{r}
+fit.Fare = rpart(Fare ~ Pclass + SibSp + Parch + Age + Embarked + Title, 
+                 data = all[!is.na(all$Fare),],
+                 method = "anova")
+all$Fare[is.na(all$Fare)] = predict(fit.Fare, newdata = all[is.na(all$Fare), ])
+```
+
+## Age
+
+It is observed that Age of 263 passengers is missing from the combined dataset, which needs to be imputed suitably.
+
+```{r}
+marginplot(data.frame(all$Age, all$Pclass))
+
+table(all[is.na(all$Age), "Pclass"])  # makes it more obvious than the plot
+```
+
+The missing age is not randomly distributed across all classes, but is rather concentrated amongst the passengers from 3rd class, indicating a missing at random(MAR) problem. Mice package can be used to impute these data using pmm or predictive mean matching method.
+
+Huey questions: 
+- Re: above, don't see the concentration from the margin plot, but using a table works
+-Why do we exclude the columns below? Survived and PassengerId make sense
+
+```{r, warning=FALSE,results='hide'}
+
+ageData <- mice(all[, !names(all) %in% c("Survived", "Name", "PassengerId", "Ticket", "AgeClass", "Cabin", "FamilyName")],m=8,maxit=8,meth='pmm',seed=251863)
+```
+```{r, warning=FALSE}
+# Check out the imputed data
+head(ageData$imp$Age)
+
+# Check if the imputed data distribution follows the existing age distribution.
+ggplot(all,aes(x=Age)) + 
+  geom_density(data=data.frame(all$PassengerId, complete(ageData,6)), alpha = 0.2, fill = "blue")+
+  geom_density(data=all, alpha = 0.2, fill = "Red")+
+  labs(title="Age Distribution")+
+  labs(x="Age")
+
+```
+
+Imputed data seem to be acceptable and can be used for filling in the missing values in AgeClass and Title.
+
+Huey questions: Not sure why we use the sixth imputed data, not the eight
+TODO: can see if it affects results
+
+```{r}
+# Sixth imputed data is picked up for further analysis based on the density distribution
+all.imp <- data.frame(all$PassengerId, complete(ageData,6))
+
+all$Age = all.imp$Age
+
+all[is.na(all$AgeClass),]$AgeClass = ifelse(all[is.na(all$AgeClass),]$Age<=10,1,
+                      ifelse(all[is.na(all$AgeClass),]$Age>10 & all[is.na(all$AgeClass),]$Age<=20,2,
+                             ifelse(all[is.na(all$AgeClass),]$Age>20 & all[is.na(all$AgeClass),]$Age<=35,3,4)))
+
+# All women above age of 14.5, with title Miss are to be recategorised as Ms.
+all[all$Title == "Miss" & all$Age > 14.5,]$Title = "Ms"
+
+# Check if titles and age are as required.
+table(all$Title, all$Age > 14.5)
+```
+
+## Cabin
+
+Missing cabin data can be imputed for people from same family, assuming they shared the cabins or had cabins nearby.
+
+```{r}
+# Extract single alphabet prefixed to each cabin number provided. Each of these letters represent the part of the deck were these cabins were located.
+all$CabinNo = sapply(all$Cabin,function(x) substr(x,1,1))
+all$CabinNo[all$CabinNo == ""] = NA
+table(is.na(all$CabinNo))
+
+# Dataset of all families with cabin data
+familyWithCabinNo = unique(all[!is.na(all$CabinNo) & all$SibSp + all$Parch > 0,c("FamilyName", "CabinNo")])
+head(familyWithCabinNo)
+
+# Function to check if these people are travelling with family 
+checkIfHasCabin <- function(familyName, CabinNo){   
+  ifelse (familyName %in% familyWithCabinNo$FamilyName, familyWithCabinNo$CabinNo, CabinNo)      
+}
+
+# Assign same cabin number to those members of a single family, whose cabin number is missing 
+all[is.na(all$CabinNo),]$CabinNo = apply(all[ is.na(all$CabinNo),c("FamilyName", "CabinNo")], 1, function(y) checkIfHasCabin(y["FamilyName"], y["CabinNo"]))
+
+table(is.na(all$CabinNo))
+table(all$CabinNo, all$Pclass)
+```
+
+There are still some missing cabin data. Divide the unknown observations for cabin no into cabins for each Pclass in the same ratio as currently available. 
+
+Edit: some should be a lot. This technique above only changed 5 rows from NA to not NA
+
+```{r}
+# Note: This procedure has been taken from script submitted on Kaggle.
+
+# for first class obs
+A.1 = round(22/(323-65) * 65)
+B.1 = round(65/(323-65) * 65)
+C.1 = round(96/(323-65) * 65)
+D.1 = round(40/(323-65) * 65)
+E.1 = 65 - (A.1+B.1+C.1+D.1)
+# for second class
+D.2 = round(6/(277-254) * 254)
+E.2 = round(4/(277-254) * 254)
+F.2 = 254 - (D.2+E.2)
+# for third class
+E.3 = round(3/(709-691) * 691)
+F.3 = round(8/(709-691) * 691)
+G.3 = 691 - (E.3+F.3)
+
+set.seed(0)
+all[ sample( which( all$Pclass==1 & is.na(all$CabinNo)), A.1 ) , "CabinNo"] <- rep("A", A.1)
+all[ sample( which( all$Pclass==1 & is.na(all$CabinNo)), B.1 ) , "CabinNo"] <- rep("B", B.1)
+all[ sample( which( all$Pclass==1 & is.na(all$CabinNo)), C.1 ) , "CabinNo"] <- rep("C", C.1)
+all[ sample( which( all$Pclass==1 & is.na(all$CabinNo)), D.1 ) , "CabinNo"] <- rep("D", D.1)
+all[ sample( which( all$Pclass==1 & is.na(all$CabinNo)), E.1 ) , "CabinNo"] <- rep("E", E.1)
+
+set.seed(0)
+all[ sample( which( all$Pclass==2 & is.na(all$CabinNo)), D.2 ) , "CabinNo"] <- rep("D", D.2)
+all[ sample( which( all$Pclass==2 & is.na(all$CabinNo)), E.2 ) , "CabinNo"] <- rep("E", E.2)
+all[ sample( which( all$Pclass==2 & is.na(all$CabinNo)), F.2 ) , "CabinNo"] <- rep("F", F.2)
+
+set.seed(0)
+all[ sample( which( all$Pclass==3 & is.na(all$CabinNo)), E.3 ) , "CabinNo"] <- rep("E", E.3)
+all[ sample( which( all$Pclass==3 & is.na(all$CabinNo)), F.3 ) , "CabinNo"] <- rep("F", F.3)
+all[ sample( which( all$Pclass==3 & is.na(all$CabinNo)), G.3 ) , "CabinNo"] <- rep("G", G.3)
+
+all$CabinNo = as.factor(all$CabinNo)
+table(all$CabinNo, all$Pclass)
+```
+ 
+ 
+Finally, dataset is divided back into training and test set for further analysis.
+
+```{r}
+all$Ticket = NULL
+all$Name = NULL
+all$Cabin = NULL
+
+summary(all)
+
+train = all[1:891,]
+test = all[892:1309,]
+
+train$Survived <- as.factor(Survived)
+train$Survived <- as.factor(mapvalues(train$Survived, c("0", "1"), c("No","Yes")))
+train$PassengerId = NULL
+```
+
+Huey question: why do you need to map values from 0 to 1 to no yes? for clarity?
+
+# Lasso and Ridge Models
+
+## Training and validation sets
+Dataset is split into separate male and female datasets, with respective Training and validation sets created using sample.split function. Levels and variables that are no longer meaningful in the newly created datasets are dropped.
+
+```{r}
+train.male = subset(train, train$Sex == "male")
+train.female = subset(train, train$Sex == "female")
+test.male = subset(test, test$Sex == "male")
+test.female = subset(test, test$Sex == "female")
+
+train.male$Sex = NULL
+train.male$Mother = NULL
+train.male$Title = droplevels(train.male$Title)
+
+train.female$Sex = NULL
+train.female$Title = droplevels(train.female$Title)
+
+test.male$Sex = NULL
+test.male$Mother = NULL
+test.male$Title = droplevels(test.male$Title)
+
+test.female$Sex = NULL
+test.female$Title = droplevels(test.female$Title)
+
+# MALE
+set.seed(100)
+splt.m = sample.split(train.male, 0.75)  
+cv.train.m = train.male[splt.m,]
+cv.test.m = train.male[!splt.m,]
+
+# FEMALE
+set.seed(100)
+splt.f = sample.split(train.female, 0.75)  
+cv.train.f = train.female[splt.f,]
+cv.test.f = train.female[!splt.f,]
+
+```
+
+
+## Model Training and Prediction
+
+### Male Dataset
+```{r}
+x.m = data.matrix(cv.train.m[,2:14])
+y.m = cv.train.m$Survived
+
+set.seed(356)
+# 10 fold cross validation
+cvfit.m.ridge = cv.glmnet(x.m, y.m, 
+                  family = "binomial", 
+                  alpha = 0,
+                  type.measure = "class")
+
+cvfit.m.lasso = cv.glmnet(x.m, y.m, 
+                  family = "binomial", 
+                  alpha = 1,
+                  type.measure = "class")
+par(mfrow=c(1,2))
+plot(cvfit.m.ridge, main = "Ridge")
+plot(cvfit.m.lasso, main = "Lasso")
+coef(cvfit.m.ridge, s = "lambda.min")
+```
+
+Ridge model gives a better misclassification error than the Lasso model, hence former is used for prediction.
+
+```{r,warning=FALSE}
+# Prediction on training set
+PredTrain.M = predict(cvfit.m.ridge, newx=x.m, type="class")
+table(cv.train.m$Survived, PredTrain.M, cv.train.m$Title)
+confusionMatrix(PredTrain.M, cv.train.m$Survived, positive = "Yes")
+
+# Prediction on validation set
+PredTest.M = predict(cvfit.m.ridge, newx=data.matrix(cv.test.m[,2:14]), type="class")
+table(cv.test.m$Survived, PredTest.M, cv.test.m$Title)
+confusionMatrix(PredTest.M, cv.test.m$Survived, positive = "Yes")
+
+# Prediction on test set
+PredTest.M = predict(cvfit.m.ridge, newx=data.matrix(test.male[,3:15]), type="class")
+table(PredTest.M, test.male$Title)  
+```
+
+Although ridge model does a fairly good job at predicting survivors among male below 14.5 years of age with very high precision and recall, i.e. for Master, it fails to predict even a single surviving adult male.
+
+### Female Dataset
+```{r}
+x.f = data.matrix(cv.train.f[,2:15])
+y.f = cv.train.f$Survived
+
+set.seed(356)
+cvfit.f.ridge = cv.glmnet(x.f, y.f, 
+                  family = "binomial", 
+                  alpha = 0,
+                  type.measure = "class")
+cvfit.f.lasso = cv.glmnet(x.f, y.f, 
+                  family = "binomial", 
+                  alpha = 1,
+                  type.measure = "class")
+par(mfrow=c(1,2))
+plot(cvfit.f.ridge, main = "Ridge")
+plot(cvfit.f.lasso, main = "Lasso")
+coef(cvfit.f.ridge, s = "lambda.min")
+
+```
+
+Although, lasso model gives much better misclassification error than the ridge model in case of female dataset, kappa statistics on the training set is better for ridge model.
+
+```{r, warning=F,message=F}
+# Ridge Model
+# Prediction on training set
+PredTrain.F = predict(cvfit.f.ridge, newx=x.f, type="class")
+table(cv.train.f$Survived, PredTrain.F, cv.train.f$Title)
+confusionMatrix(PredTrain.F, cv.train.f$Survived, positive = "Yes")
+
+# Prediction on validation set
+PredTest.F = predict(cvfit.f.ridge, newx=data.matrix(cv.test.f[,2:15]), type="class")
+table(cv.test.f$Survived, PredTest.F, cv.test.f$Title)
+confusionMatrix(PredTest.F, cv.test.f$Survived, positive = "Yes")
+
+# Lasso Model
+# Prediction on training set
+PredTrain.F = predict(cvfit.f.lasso, newx=x.f, type="class")
+table(cv.train.f$Survived, PredTrain.F, cv.train.f$Title)
+confusionMatrix(PredTrain.F, cv.train.f$Survived, positive = "Yes")
+
+# Prediction on validation set
+PredTest.F = predict(cvfit.f.lasso, newx=data.matrix(cv.test.f[,2:15]), type="class")
+table(cv.test.f$Survived, PredTest.F, cv.test.f$Title)
+confusionMatrix(PredTest.F, cv.test.f$Survived, positive = "Yes")
+
+# Prediction on test set
+PredTest.F = predict(cvfit.f.ridge, newx=data.matrix(test.female[,3:16]), type="class")
+table(PredTest.F, test.female$Title)
+
+```
+
+For female dataset, ridge regression has a very high recall value for all three categories of females, namely, Miss, Ms and Mrs, but it predicts some false positives, predicting more survivors than there actually.
+
+## Kaggle Results -  Ridge
+
+```{r}
+MySubmission.F = data.frame(PassengerId = test.female$PassengerId, Survived = ifelse(PredTest.F == "Yes",1,0)) 
+MySubmission.M = data.frame(PassengerId = test.male$PassengerId, Survived = ifelse(PredTest.M == "Yes",1,0))     
+
+MySubmission = rbind(MySubmission.F, MySubmission.M)
+MySubmission = MySubmission[order(MySubmission$PassengerId),]
+names(MySubmission) = c("PassengerId","Survived")   
+table(MySubmission$Survived)
+
+write.csv(MySubmission, file = 'Submission_RIDGE.csv', row.names = F)
+
+```
+
+In view of zero survival prediction among the adult male and too many false positives in case of females, this model did reasonably well with a score of 0.82297 on the public leaderboard.
+
+## Kaggle Results - Elastic
+
+Below, we try elastic net regression
+
+### Male
+
+```{r, warning=F,message=F}
+set.seed(356)
+
+grid = expand.grid(alpha = seq(0, 1, 0.1), lambda = 10^seq(2, -5, length.out=100))
+control = trainControl(method = "repeatedcv", number = 10, repeats = 3, 
+                        verboseIter = TRUE, search = "grid", classProbs = TRUE, summaryFunction = multiClassSummary)
+elastic.fit = train(x = x.m, y = y.m, method = "glmnet", tuneGrid = grid, metric = "Kappa", trControl = control)
+
+best.alpha = elastic.fit$bestTune$alpha
+best.lambda = elastic.fit$bestTune$lambda
+
+# Prediction on training set
+fit = glmnet(x.m, y.m, family = "binomial", alpha=best.alpha, lambda=best.lambda)
+Elastic.PredTrain.M = predict(fit, x.m, type="class")
+table(cv.train.m$Survived, Elastic.PredTrain.M, cv.train.m$Title)
+confusionMatrix(Elastic.PredTrain.M, cv.train.m$Survived, positive = "Yes")
+
+# Prediction on validation set
+Elastic.PredTest.M = predict(fit, newx=data.matrix(cv.test.m[,2:14]), type="class")
+table(cv.test.m$Survived, Elastic.PredTest.M, cv.test.m$Title)
+confusionMatrix(Elastic.PredTest.M, cv.test.m$Survived, positive = "Yes")
+
+# Prediction on test set
+Elastic.PredTest.M = predict(fit, newx=data.matrix(test.male[,3:15]), type="class")
+table(Elastic.PredTest.M, test.male$Title)  
+```
+
+Kappa appears higher on the training set
+However, Kappa is lower on the validation set
+
+
+### Female
+
+```{r, warning=F,message=F}
+set.seed(356)
+grid = expand.grid(alpha = seq(0, 1, 0.1), lambda = 10^seq(2, -5, length.out=100))
+control = trainControl(method = "repeatedcv", number = 10, repeats = 3, 
+                        verboseIter = TRUE, search = "grid", classProbs = TRUE, summaryFunction = multiClassSummary)
+elastic.fit = train(x = x.f, y = y.f, method = "glmnet", tuneGrid = grid, metric = "Kappa", trControl = control)
+
+best.alpha = elastic.fit$bestTune$alpha
+best.lambda = elastic.fit$bestTune$lambda
+
+# Prediction on training set
+fit = glmnet(x.f, y.f, family = "binomial", alpha=best.alpha, lambda=best.lambda)
+Elastic.PredTrain.F = predict(fit, x.f, type="class")
+table(cv.train.f$Survived, Elastic.PredTrain.F, cv.train.f$Title)
+confusionMatrix(Elastic.PredTrain.F, cv.train.f$Survived, positive = "Yes")
+
+# Prediction on validation set
+Elastic.PredTest.F = predict(fit, newx=data.matrix(cv.test.f[,2:15]), type="class")
+table(cv.test.f$Survived, Elastic.PredTest.F, cv.test.f$Title)
+confusionMatrix(Elastic.PredTest.F, cv.test.f$Survived, positive = "Yes")
+
+# Prediction on test set
+Elastic.PredTest.F = predict(fit, newx=data.matrix(test.female[,3:16]), type="class")
+table(Elastic.PredTest.F, test.female$Title)  
+```
+
+Kappa is better on training than ridge (0.69) and lasso (0.66)
+Kappai is the same as validation (0.77) compared to ridge and (0.77)
+
+
+```{r}
+MySubmission.F = data.frame(PassengerId = test.female$PassengerId, Survived = ifelse(Elastic.PredTest.F == "Yes",1,0)) 
+MySubmission.M = data.frame(PassengerId = test.male$PassengerId, Survived = ifelse(Elastic.PredTest.M == "Yes",1,0))     
+
+names(MySubmission.F)[2] = "Survived"
+names(MySubmission.M)[2] = "Survived" 
+
+MySubmission = rbind(MySubmission.F, MySubmission.M)
+MySubmission = MySubmission[order(MySubmission$PassengerId),]
+names(MySubmission) = c("PassengerId","Survived")   
+table(MySubmission$Survived)
+
+write.csv(MySubmission, file = 'Submission_ELASTIC.csv', row.names = F)
+```
+
+Result = 0.80861
+
+# Conclusion
+
+Ridge regression seems to predict on female dataset with higher precision and recall than on the male. Since the number of survivors in the male dataset is much less than that in female dataset, it fails to predict survivors especially among the adult male. 
+
+Elastic net regularization didn't seem to do any better, but as with anything, it's possible I could be doing something incorrectly. I hope
+this could be a good starting point for someone else.
+
+## What next?
+
+Since one would assume some survivors among the men in the test set as well, next step would be to try other machine learning algorithms to get a better prediction on male survival. Also, there are lot of false positives in the female dataset as well, which needs to worked on.
+
+Any comments or suggestions are very much welcome!
