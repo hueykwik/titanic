@@ -1,2 +1,4 @@
 examples/
 .ipynb_checkpoints/
+notes/
+.RData
