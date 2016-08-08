@@ -3,7 +3,7 @@ import numpy as np
 import csv as csv
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
-from sklearn import cross_validation
+from sklearn.grid_search import GridSearchCV
 
 from ggplot import ggplot, aes, geom_bar, geom_histogram
 
@@ -67,7 +67,7 @@ def clean_up(df, ports_dict):
     
     return(df)
 
-train_df = pd.read_csv('train-original.csv', header=0)
+train_df = pd.read_csv('trainl.csv', header=0)
 test_df = pd.read_csv('test.csv', header=0) 
 
 ids = test_df['PassengerId']
@@ -100,10 +100,23 @@ forest = RandomForestClassifier(n_estimators=500)
 #forest = forest.fit(train_data[0::,1::], train_data[0::,0])
 
 predictors = ["Pclass", "Sex", "Age", "SibSp", "Parch", "Fare", "Embarked"]
-scores = cross_validation.cross_val_score(forest, train_df[predictors], train_df["Survived"], cv = 3)
-print("Random Forest Accuracy: %.2f" % scores.mean())
 
-output = forest.predict(test_data[0::,1::]).astype(int)
+# set up parameters
+parameters = {'n_estimators': [4, 6, 10, 50, 500], 
+              'max_features': ['log2', 'sqrt', 'auto'], 
+              'criterion': ['entropy', 'gini'],
+              'min_samples_split': [2, 3, 5],
+              'min_samples_leaf': [1, 5, 8]
+             }
+
+# grid search CV
+grid_obj = GridSearchCV(forest, parameters, verbose=1, n_jobs=2)
+grid_obj = grid_obj.fit(train_df[predictors], train_df['Survived'])
+
+bestForest = grid_obj.best_estimator_
+bestForest.fit(train_df[predictors], train_df['Survived'])
+
+output = bestForest.predict(test_df[predictors]).astype(int)
 
 predictions_file = open("forestPython.csv", "wb")
 open_file_object = csv.writer(predictions_file)
@@ -113,20 +126,28 @@ predictions_file.close()
 
 ### LogisticRegression
 logistic = LogisticRegression()
-logistic = logistic.fit(train_data[0::,1::], train_data[0::,0])
+logistic = logistic.fit(train_df[predictors], train_df["Survived"])
+
+logistic.get_params()
 
 # Calculate training error
-score = logistic.score(train_data[0::,1::], train_data[0::,0])
+score = logistic.score(train_df[predictors], train_df["Survived"])
 print("Logistic accuracy: %.2f" % (score * 100))
 
 
-output = logistic.predict(test_data[0::,1::]).astype(int)
+output = logistic.predict(test_df[predictors]).astype(int)
 
 predictions_file = open("logisticPython.csv", "wb")
 open_file_object = csv.writer(predictions_file)
 open_file_object.writerow(["PassengerId","Survived"])
 open_file_object.writerows(zip(ids, output))
 predictions_file.close()
+
+
+
+
+
+
 
 
 
